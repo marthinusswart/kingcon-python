@@ -110,3 +110,32 @@ def to_bitplanes(pixels, width, height, num_planes):
   - OCS/ECS (12-bit): 2 bytes per color (`0000RRRRGGGGBBBB`).
   - AGA (24-bit): 4 bytes per color (typically `00RRRRRRRRGGGGGGGGBBBBBBBB`).
 - **FreeImage vs Pillow Coordinates**: FreeImage can be bottom-to-top. `kingcon.cpp` explicitly flips vertically. Pillow is top-to-bottom, so this flip might be unnecessary in the Python version, but check against the original output to be sure.
+
+## 5. Lessons Learned & Quirks Discovered
+
+### The FreeImage Palette Padding Quirk (0x0111)
+During migration, we observed that unused palette entries in the legacy C++ kingcon output were sometimes padded with `0x0111` (or `$111` in Amiga terms). This is a side-effect of how kingcon interacts with the FreeImage library, specifically during the expansion of the image palette to 8-bit.
+
+**1. Where does the 0x0111 value come from?**
+The value `0x111` is not hardcoded as a padding constant in `kingcon.cpp`. Instead, it is the result of converting FreeImage's default grayscale ramp into 12-bit Amiga colors.
+
+When kingcon loads an image (e.g., a 16-color 4-bit PNG), it immediately ensures the bitmap is in an 8-bit format to simplify processing. In FreeImage, converting a 4-bit image to 8-bit expands the palette from 16 to 256 entries. FreeImage typically initializes the remaining entries (16–255) with a grayscale ramp where each component (R, G, B) is equal to the palette index `i`.
+
+When kingcon converts these 8-bit RGB values to 12-bit Amiga colors, it uses a `/ 16` (or `>> 4`) division logic mapping:
+Because of the division, any RGB value in the range `[16, 31]` results in a `1`. Since the unused palette entries 16 through 31 in the FreeImage ramp have RGB values `(16,16,16)` through `(31,31,31)`, they all map to `0x111` in 12-bit.
+
+**2. How does the loop pad the palette?**
+The C++ program does not have a "padding loop" that fills in missing colors with a default zero. Instead, it blindly extracts the first $2^N$ colors from the bitmap's palette, where $N$ is the number of bitplanes requested. 
+
+If you requested 5 bitplanes (`-Format=5`), the loop runs from `i = 0` to `31`. If the PNG only provided 16 colors, indices 16 to 31 are pulled from the FreeImage-generated ramp, leading to the `$111` padding observed.
+
+**Summary:**
+* **The origin:** It is picking up the grayscale ramp indices 16 through 31 from the FreeImage 8-bit bitmap palette.
+* **The logic:** The `/ 16` scaling maps the RGB values 16-31 to the 12-bit value `1` for each channel.
+* **The fix (for Python):** To maintain 100% binary compatibility with legacy outputs in testing, `loader.py` actively replicates this artifact. If clean `$000` padding is desired in the future, the code should be updated to explicitly initialize the unused palette array to zeros.
+
+### Command-Line Interface (CLI) Magic
+Python projects can mimic standalone compiled C++ binaries without requiring users to prefix commands with `python`. By defining the `[project.scripts]` mapping in `pyproject.toml` (e.g., `kingcon = "kingcon_python.cli:main"`) and installing the package locally via `pip install -e .`, pip automatically generates an executable wrapper in the `.venv/bin` directory. Because `.venv` modifies the system `PATH`, typing `kingcon` transparently invokes the Python package.
+
+### Formats and Masks
+Based on analysis of legacy batch scripts (`convert.cmd`), `kingcon` handles masks by assigning them `-Format=1`. Standard tiled outputs or sprites typically use `-Format=5` (32 colors). 
