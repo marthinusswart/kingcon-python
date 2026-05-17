@@ -40,6 +40,9 @@ dev = [
     "mypy>=1.5.0",
 ]
 
+[project.scripts]
+kingcon = "{project_name}.cli:main"
+
 [tool.ruff]
 line-length = 88
 target-version = "py39"
